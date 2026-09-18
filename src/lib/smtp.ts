@@ -219,7 +219,7 @@ export async function sendInvitationEmail(args: {
   const inviter = escapeHtml(args.inviterEmail);
 
   const html = buildEmailShell({
-    preheader: `${args.inviterEmail} wants to bring you to OunceBook.`,
+    preheader: `${inviter} wants to bring you to OunceBook.`,
     title: "Someone wants to bring you with them",
     summary: `${inviter} named you as someone they would bring to OunceBook.`,
     body: [
@@ -274,7 +274,7 @@ export async function sendNamedYouEmail(args: {
   const html = buildEmailShell({
     preheader: args.mutual
       ? "You both named each other."
-      : `${args.inviterEmail} named you.`,
+      : `${inviter} named you.`,
     title: args.mutual ? "You both named each other" : "Someone named you",
     summary: args.mutual
       ? `You and ${inviter} each said you would bring the other.`

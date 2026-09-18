@@ -8,6 +8,9 @@ import {
 import { sendInvitationEmail, sendNamedYouEmail } from "@/lib/smtp";
 import { parseInviteeEmails } from "@/lib/validation";
 
+/** Lifetime ceiling on how many people one account can have us contact. */
+const MAX_INVITATIONS_PER_INVITER = 20;
+
 const SITE_URL = (
   process.env.NEXT_PUBLIC_SITE_URL ?? "https://ouncebook.com"
 ).replace(/\/$/, "");
@@ -69,10 +72,21 @@ export async function recordInvitations(inviterEmail: string, rawList?: string) 
 
   try {
     const invitations = await getInvitationCollection();
-    const now = new Date();
 
-    await invitations.bulkWrite(
-      emails.map((inviteeEmail) => ({
+    // Five per submission is not a limit if submissions are unlimited. Cap the
+    // lifetime total so one account cannot mail the world a handful at a time.
+    const already = await invitations.countDocuments({ inviterEmail: inviter });
+    const room = MAX_INVITATIONS_PER_INVITER - already;
+
+    if (room <= 0) {
+      return 0;
+    }
+
+    const now = new Date();
+    const batch = emails.slice(0, room);
+
+    const result = await invitations.bulkWrite(
+      batch.map((inviteeEmail) => ({
         updateOne: {
           filter: { inviterEmail: inviter, inviteeEmail },
           update: {
@@ -91,10 +105,19 @@ export async function recordInvitations(inviterEmail: string, rawList?: string) 
       { ordered: false },
     );
 
-    return emails.length;
+    // Newly recorded, not merely submitted. Re-sending the same list writes
+    // nothing, and telling someone we notified five people when we notified
+    // none would be a lie the interface has no way to walk back.
+    return result.upsertedCount ?? 0;
   } catch (error) {
     console.error("Recording invitations failed", { inviter }, error);
-    return 0;
+
+    // A concurrent duplicate can fail the batch after some upserts landed;
+    // report what actually got written rather than claiming nothing did.
+    const partial = (error as { result?: { upsertedCount?: number } })?.result
+      ?.upsertedCount;
+
+    return typeof partial === "number" ? partial : 0;
   }
 }
 
@@ -143,7 +166,14 @@ export async function dispatchInvitationsFor(inviterEmail: string) {
           }),
         ]);
 
-        const mutual = Boolean(reciprocal);
+        // A reciprocal row only counts once its author proved they own that
+        // address. Anyone can sign up as someone else and name a target; if an
+        // unverified row could make a match, that alone would tell the target
+        // an account exists under the other address.
+        const mutual = Boolean(
+          reciprocal &&
+            (inviteeEntry?.status === "verified" || inviteeEntry?.verifiedAt),
+        );
 
         if (inviteeEntry) {
           await sendNamedYouEmail({
@@ -152,8 +182,9 @@ export async function dispatchInvitationsFor(inviterEmail: string) {
             mutual,
           });
 
-          if (mutual) {
-            // Both sides consented by naming each other, so both get told.
+          if (mutual && !(await suppressions.findOne({ email: inviter }))) {
+            // Both sides consented by naming each other, so both get told —
+            // unless this one asked us never to contact them.
             await sendNamedYouEmail({
               to: inviter,
               inviterEmail: invitee,
